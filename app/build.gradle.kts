@@ -36,6 +36,8 @@ android {
 
     buildTypes {
         release {
+            // Signed with the debug key so it installs over the debug build and keeps the data.
+            signingConfig = signingConfigs.getByName("debug")
             optimization {
                 enable = true
                 packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
@@ -59,6 +61,8 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    // Lets Android compile the app's startup code ahead of time, so the first launch isn't slow.
+    implementation(libs.androidx.profileinstaller)
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -1,6 +1,7 @@
 package com.example.tut.data
 
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /** Data changes shared by the recording page and the data page. Blocking: call from Dispatchers.IO. */
 class DataOps(private val repo: Repository, private val settings: SettingsStore) {
@@ -22,9 +23,10 @@ class DataOps(private val repo: Repository, private val settings: SettingsStore)
      */
     fun refreshColors(exerciseId: Long) {
         var ex: Exercise? = repo.exercise(exerciseId) ?: return
+        val scale = setBySetScale(ex!!.name)
         var guard = 0
         while (ex != null && guard++ < 10_000) {
-            updateExerciseColor(ex)
+            updateExerciseColor(ex, scale)
             refreshSessionColor(ex.sessionId)
             ex = repo.nextSameExercise(ex)
         }
@@ -58,14 +60,40 @@ class DataOps(private val repo: Repository, private val settings: SettingsStore)
         repo.exercises(id).forEach { refreshColors(it.id) }
     }
 
+    /** Sets how recovered a workout felt and recolours it (set by set, the rating can change its colour). */
+    fun setRecovery(exerciseId: Long, rating: RecoveryRating?) {
+        repo.setExerciseRecovery(exerciseId, rating)
+        refreshColors(exerciseId)
+    }
+
     /** Recolours every exercise from its first time on (e.g. so existing streaks turn gold). */
     fun recolorAll() {
         repo.firstOfEachExercise().forEach { refreshColors(it.id) }
     }
 
-    private fun updateExerciseColor(ex: Exercise) {
+    /** The scale to compare [name] set by set with; null when it compares best sets ([Progress.compare]). */
+    private fun setBySetScale(name: String): ProgressScale? {
+        val s = settings.current
+        if (!s.comparesAllSets(name)) return null
+        val same = repo.allWorkouts().filter { Predictions.key(it.name) == Predictions.key(name) }
+        return Predictions.scaleFor(name, same, s)
+    }
+
+    /**
+     * Set by set, the colour follows the recovery score after the rating: under 50% weaker (red),
+     * over 50% stronger (green), 50% the same (gray). Rounded as shown, so "50%" is always gray.
+     */
+    private fun setBySetColor(prev: Exercise, ex: Exercise, scale: ProgressScale): BlockColor? {
+        val c = scale.compareSets(repo.sets(prev.id), repo.sets(ex.id), ex.recoveryRating) ?: return null
+        val pct = c.pct.roundToInt()
+        return if (pct < 50) BlockColor.RED else if (pct > 50) BlockColor.GREEN else BlockColor.GRAY
+    }
+
+    private fun updateExerciseColor(ex: Exercise, scale: ProgressScale?) {
         val prev = repo.previousSameExercise(ex)
-        var color = prev?.let { Progress.compare(repo.sets(it.id), repo.sets(ex.id), settings.current) }
+        var color = prev?.let {
+            if (scale != null) setBySetColor(it, ex, scale) else Progress.compare(repo.sets(it.id), repo.sets(ex.id), settings.current)
+        }
         // Stronger again right after a stronger one climbs the gold streak; same or weaker ends it.
         if (color == BlockColor.GREEN && prev != null && Progress.improved(prev.color)) color = prev.color!!.nextInStreak()
         // Weaker again right after a weaker one darkens: red -> dark red -> black (overtraining).

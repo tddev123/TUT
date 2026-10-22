@@ -344,6 +344,8 @@ private fun BubbleArea(
                     set.reps?.let { "$it reps" },
                     set.tutSec?.let { "TUT ${formatDuration(it)}" },
                     if (settings.rirEnabled) rirText(set, settings) else null,
+                    set.endRangeSec?.let { "Hold ${formatDuration(it)}" },
+                    set.topRestSec?.let { "Top rest ${formatDuration(it)}" },
                 ).joinToString(" · ")
                 val rirColor = if (settings.rirEnabled && set.rirLevel != null) set.rirLevel.toColor() else TutColors.Text
                 Column(

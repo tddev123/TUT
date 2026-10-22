@@ -15,6 +15,7 @@ data class WorkSetValues(
     val tutSec: Int? = null,
     val rirLevel: RirLevel? = null,
     val rirValue: Int? = null,
+    val endRangeSec: Int? = null,
 ) {
     fun isEmpty() = this == WorkSetValues()
 
@@ -23,6 +24,7 @@ data class WorkSetValues(
         is Action.Weight -> copy(weight = action.value, unit = action.unit ?: defaultUnit)
         is Action.Reps -> copy(reps = action.count)
         is Action.Tut -> copy(tutSec = action.seconds)
+        is Action.EndRange -> copy(endRangeSec = action.seconds)
         is Action.Rir -> if (action.value != null) copy(rirLevel = ops.levelFor(action.value), rirValue = action.value)
         else copy(rirLevel = action.level, rirValue = null)
         else -> this
@@ -38,6 +40,7 @@ data class WorkSetValues(
             tutSec = tutSec ?: set.tutSec,
             rirLevel = if (rirChanged) rirLevel else set.rirLevel,
             rirValue = if (rirChanged) rirValue else set.rirValue,
+            endRangeSec = endRangeSec ?: set.endRangeSec,
         )
     }
 }

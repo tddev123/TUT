@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.example.tut.data.WordAliases
 import com.example.tut.data.Fatigue
 import com.example.tut.data.Predictions
+import com.example.tut.data.ProgressScale
 import java.util.Calendar
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -97,12 +98,17 @@ import com.example.tut.data.EffortMode
 import com.example.tut.data.Exercise
 import com.example.tut.data.ExerciseWithSets
 import com.example.tut.data.Progress
+import com.example.tut.data.MuscleFeel
 import com.example.tut.data.RecoveryFeeling
+import com.example.tut.data.RecoveryRating
 import com.example.tut.data.SessionWithExercises
 import com.example.tut.data.SetKind
 import com.example.tut.data.WorkSet
 import com.example.tut.parse.fmtNumber
 import com.example.tut.parse.formatDuration
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -630,6 +636,16 @@ private fun SessionDetail(
     LaunchedEffect(s, settings) {
         fatigue = withContext(Dispatchers.IO) { Fatigue.all(app.repo.allWorkouts(), settings) }
     }
+    // Days from the last time each exercise was done to this block; missing = first time.
+    var lastDays by remember { mutableStateOf<Map<Long, Long>>(emptyMap()) }
+    LaunchedEffect(s) {
+        lastDays = withContext(Dispatchers.IO) {
+            s.exercises.mapNotNull { e ->
+                val prev = app.repo.previousSameExercise(e.exercise) ?: return@mapNotNull null
+                e.exercise.id to Progress.restHoursRounded(app.repo.workoutAt(prev), s.session.startedAt) / 24
+            }.toMap()
+        }
+    }
     LaunchedEffect(s) {
         curves = withContext(Dispatchers.IO) { s.exercises.mapNotNull { curveFor(app, it.exercise) } }
     }
@@ -727,7 +743,7 @@ private fun SessionDetail(
             if (s.exercises.isEmpty()) Text("No exercises recorded.", color = TutColors.Muted, modifier = Modifier.padding(bottom = 10.dp))
             s.exercises.chunked(2).forEach { row ->
                 Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    row.forEach { e -> SmallBlock(e, fatigue[e.exercise.id], Modifier.weight(1f)) { onOpenExercise(e.exercise.id) } }
+                    row.forEach { e -> SmallBlock(e, fatigue[e.exercise.id], lastDays[e.exercise.id], Modifier.weight(1f)) { onOpenExercise(e.exercise.id) } }
                     if (row.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
@@ -831,7 +847,7 @@ private fun ResumeRecordingButton(holdMs: Long, modifier: Modifier, onResume: ()
 }
 
 @Composable
-private fun SmallBlock(e: ExerciseWithSets, fatigue: Fatigue.Level?, modifier: Modifier, onClick: () -> Unit) {
+private fun SmallBlock(e: ExerciseWithSets, fatigue: Fatigue.Level?, lastDays: Long?, modifier: Modifier, onClick: () -> Unit) {
     val color = e.exercise.color
     val black = color == BlockColor.BLACK
     Column(
@@ -848,6 +864,17 @@ private fun SmallBlock(e: ExerciseWithSets, fatigue: Fatigue.Level?, modifier: M
         Text(e.exercise.displayName, color = TutColors.Text, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 2)
         val done = e.sets.count { it.hasData }
         Text(if (done == 1) "1 set" else "$done sets", color = TutColors.Muted, fontSize = 12.sp)
+        if (e.exercise.name.isNotBlank()) {
+            Text(
+                when (lastDays) {
+                    null -> "First time"
+                    0L -> "Last done same day"
+                    1L -> "Last done 1 day ago"
+                    else -> "Last done $lastDays days ago"
+                },
+                color = TutColors.Muted, fontSize = 12.sp,
+            )
+        }
         if (fatigue != null && fatigue.level > 0) {
             Text("Fatigue ${fatigue.level}", color = fatigueColor(fatigue.level), fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
@@ -891,18 +918,37 @@ private fun FatigueChooser(app: TutApp, ex: Exercise, settings: AppSettings) {
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             val manual = ex.fatigueManual
-            FatigueChip("Auto", manual == null) { set(null) }
-            (0..5).forEach { v -> FatigueChip(v.toString(), manual == v) { set(v) } }
+            FatigueChip("Auto", manual == null, settings.pickHoldMs) { set(null) }
+            (0..5).forEach { v -> FatigueChip(v.toString(), manual == v, settings.pickHoldMs) { set(v) } }
         }
     }
 }
 
 @Composable
-private fun FatigueChip(text: String, selected: Boolean, onClick: () -> Unit) {
+private fun FatigueChip(text: String, selected: Boolean, holdMs: Int, onClick: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+    val picked by rememberUpdatedState(onClick)
     Text(
         text, color = if (selected) Color.Black else TutColors.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) TutColors.Orange else TutColors.SurfaceHigh)
-            .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 6.dp),
+            // Picked only after being held for [holdMs]; letting go sooner (or scrolling) picks nothing. 0 = a tap.
+            .pointerInput(holdMs) {
+                detectTapGestures(onPress = {
+                    if (holdMs <= 0) {
+                        if (tryAwaitRelease()) picked()
+                        return@detectTapGestures
+                    }
+                    val job = scope.launch {
+                        delay(holdMs.toLong())
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        picked()
+                    }
+                    tryAwaitRelease()
+                    job.cancel()
+                })
+            }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
     )
 }
 
@@ -927,6 +973,127 @@ private fun LimitMark(marked: Boolean, onToggle: () -> Unit) {
         )
     }
 }
+
+/**
+ * Switches this exercise (every workout with its name) to set-by-set comparison: each working set
+ * against the same set last time. When on, shows how this workout compared.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SetBySetPanel(app: TutApp, ex: Exercise, settings: AppSettings) {
+    val scope = rememberCoroutineScope()
+    val on = settings.comparesAllSets(ex.name)
+    var result by remember { mutableStateOf<ProgressScale.SetComparison?>(null) }
+    LaunchedEffect(ex, settings) {
+        result = if (!on) null else withContext(Dispatchers.IO) {
+            val same = app.repo.allWorkouts().filter { Predictions.key(it.name) == Predictions.key(ex.name) }
+                .sortedWith(compareBy({ it.at }, { it.exerciseId }))
+            val scale = Predictions.scaleFor(ex.name, same, settings)
+            val i = same.indexOfFirst { it.exerciseId == ex.id }
+            val now = same.getOrNull(i) ?: return@withContext null
+            val before = same.subList(0, maxOf(i, 0)).lastOrNull { scale.bestSet(it.sets) != null } ?: return@withContext null
+            scale.compareSets(before.sets, now.sets, now.recovery)
+        }
+    }
+    fun toggle() = scope.launch(Dispatchers.IO) {
+        val key = Predictions.key(ex.name)
+        val all = if (on) settings.allSetsExercises - key else settings.allSetsExercises + key
+        app.settings.save(settings.copy(allSetsExercises = all))
+    }
+    Column(Modifier.padding(top = 8.dp)) {
+        Text(
+            if (on) "✓ All working sets compared" else "Include all working sets in predictions",
+            color = if (on) Color.Black else TutColors.Blue, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.clip(RoundedCornerShape(50)).background(if (on) TutColors.Blue else Color.Transparent)
+                .border(1.dp, TutColors.Blue, RoundedCornerShape(50)).clickable { toggle() }
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        )
+        Text(
+            if (on) "Every ${ex.displayName}: set 1 against last time's set 1, set 2 against set 2... Better, same and worse " +
+                "count 1, ½ and 0; 50% is the same as last time."
+            else "Tap to compare every working set of ${ex.displayName} with last time's, not just the best one.",
+            color = TutColors.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp),
+        )
+        if (!on) return@Column
+        result?.let { c ->
+            val verdicts = c.points.mapIndexed { i, p -> "Set ${i + 1} " + if (p >= 1.0) "better" else if (p <= 0.0) "worse" else "same" }
+            Text(
+                verdicts.joinToString(" · ") + " → ${c.setsPct.roundToInt()}%",
+                color = when {
+                    c.setsPct > 50.5 -> TutColors.Green
+                    c.setsPct < 49.5 -> TutColors.Red
+                    else -> TutColors.Text
+                },
+                fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 6.dp),
+            )
+            if (abs(c.pct - c.setsPct) >= 0.5) {
+                Text(
+                    "With “${c.rating!!.label.lowercase()}”: ${c.pct.roundToInt()}%",
+                    color = TutColors.Muted, fontSize = 12.sp,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * How recovered this workout felt, picked by hand (tap again to clear). Shown for every exercise;
+ * it counts towards predictions and fatigue once the exercise compares all working sets.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun RecoveryChooser(app: TutApp, ex: Exercise, holdMs: Int) {
+    val scope = rememberCoroutineScope()
+    fun rate(r: RecoveryRating?) = scope.launch(Dispatchers.IO) { app.ops.setRecovery(ex.id, r) }
+    Column(Modifier.padding(top = 8.dp)) {
+        Text("How recovered did it feel?", color = TutColors.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        FlowRow(
+            Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            RecoveryRating.entries.forEach { r ->
+                FatigueChip(r.label, ex.recoveryRating == r, holdMs) { rate(if (ex.recoveryRating == r) null else r) }
+            }
+        }
+        Text(
+            "Used once “include all working sets” is on: counts most when the sets were about the same as last " +
+                "time; when they were clearly better or worse, the sets decide.",
+            color = TutColors.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+}
+
+/**
+ * How the muscle felt immediately after this workout, or the next day ([nextDay]), picked by hand
+ * (tap again to clear). Never a prediction input.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MuscleFeelChooser(app: TutApp, ex: Exercise, nextDay: Boolean, holdMs: Int) {
+    val scope = rememberCoroutineScope()
+    val current = if (nextDay) ex.muscleFeelNextDay else ex.muscleFeel
+    fun pick(f: MuscleFeel?) = scope.launch(Dispatchers.IO) { app.repo.setExerciseMuscleFeel(ex.id, f, nextDay) }
+    Column(Modifier.padding(top = 8.dp)) {
+        Text(
+            if (nextDay) "How does the muscle feel the next day?" else "How does the muscle feel immediately after?",
+            color = TutColors.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        FlowRow(
+            Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            MuscleFeel.entries.forEach { f ->
+                FatigueChip(f.label, current == f, holdMs) { pick(if (current == f) null else f) }
+            }
+        }
+        Text(
+            "Only a note for you: predictions don't use it.",
+            color = TutColors.Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+}
+
+/** How long a set card is held to clear it back to blank. */
+private const val CLEAR_SET_HOLD_MS = 2000
 
 /** Small "warning: overtraining" sign on black blocks (weaker 3+ times in a row). */
 @Composable
@@ -1038,6 +1205,7 @@ private fun ExerciseDetail(
     val scope = rememberCoroutineScope()
     var previous by remember { mutableStateOf<Exercise?>(null) }
     var editing by remember { mutableStateOf<WorkSet?>(null) }
+    var resetting by remember { mutableStateOf<WorkSet?>(null) }
     var curve by remember { mutableStateOf<CurveItem?>(null) }
     var showCurve by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
@@ -1081,9 +1249,13 @@ private fun ExerciseDetail(
                 color = TutColors.Muted, fontSize = 14.sp,
             )
             FatigueChooser(app, e.exercise, settings)
+            RecoveryChooser(app, e.exercise, settings.pickHoldMs)
+            MuscleFeelChooser(app, e.exercise, nextDay = false, settings.pickHoldMs)
+            MuscleFeelChooser(app, e.exercise, nextDay = true, settings.pickHoldMs)
             LimitMark(e.exercise.limitMarked) {
                 scope.launch(Dispatchers.IO) { app.repo.setExerciseLimitMarked(e.exercise.id, !e.exercise.limitMarked) }
             }
+            SetBySetPanel(app, e.exercise, settings)
             e.exercise.color?.let { c ->
                 Pill(c.label, c.inkColor(), Modifier.padding(top = 6.dp))
                 if (c == BlockColor.BLACK) OvertrainingWarning(e.exercise.displayName, Modifier.padding(top = 10.dp))
@@ -1095,6 +1267,25 @@ private fun ExerciseDetail(
                 else "Needs working sets in both this and the last ${e.exercise.displayName}.",
                 Modifier.fillMaxWidth().padding(top = 12.dp),
             ) { showCurve = true }
+
+            // Volume: every working set's time under tension added up, e.g. "2:00 + 2:00 + 3:00 = 7:00".
+            val tuts = e.sets.filter { it.kind == SetKind.WORKING }.sortedBy { it.number }.mapNotNull { it.tutSec }
+            Column(
+                Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
+                    .background(TutColors.Surface).padding(12.dp)
+            ) {
+                Text("Volume", color = TutColors.Text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    when (tuts.size) {
+                        0 -> "No time under tension in the working sets yet."
+                        1 -> "${formatDuration(tuts[0])} time under tension"
+                        else -> tuts.joinToString(" + ") { formatDuration(it) } +
+                            " = ${formatDuration(tuts.sum())} time under tension"
+                    },
+                    color = if (tuts.isEmpty()) TutColors.Muted else TutColors.Green, fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 2.dp),
+                )
+            }
 
             Spacer(Modifier.height(12.dp))
             VoiceNoteBar(
@@ -1111,10 +1302,19 @@ private fun ExerciseDetail(
                 for (n in 1..count) {
                     val set = existing.firstOrNull { it.number == n }
                         ?: WorkSet(id = 0, exerciseId = e.exercise.id, kind = kind, number = n)
-                    SetCard(set, settings) { editing = set }
+                    // Holding a set asks to clear it back to blank: no rest, weight or anything else.
+                    // No fill while holding; let go after a second and nothing happens (it doesn't open).
+                    HoldToAct(
+                        CLEAR_SET_HOLD_MS, TutColors.Red,
+                        onHeld = { if (set.id != 0L) resetting = set },
+                        modifier = Modifier.padding(bottom = 8.dp).clip(RoundedCornerShape(12.dp)),
+                        showFill = false, noTapAfterMs = 1000,
+                    ) {
+                        SetCard(set, settings) { editing = set }
+                    }
                 }
             }
-            Text("Tap a set to edit it.", color = TutColors.Muted, fontSize = 11.sp, modifier = Modifier.padding(vertical = 16.dp))
+            Text("Tap a set to edit it. Hold one for 2 seconds to reset it.", color = TutColors.Muted, fontSize = 11.sp, modifier = Modifier.padding(vertical = 16.dp))
         }
     }
 
@@ -1134,6 +1334,17 @@ private fun ExerciseDetail(
             },
             onNo = { newName = null },
             yes = "Save", no = "Cancel",
+        )
+    }
+    resetting?.let { set ->
+        ConfirmDialog(
+            title = "Are you sure you want to reset the data in ${set.label}?",
+            onYes = {
+                resetting = null
+                scope.launch(Dispatchers.IO) { app.ops.saveSet(set.cleared(), now = s.session.startedAt, touch = false) }
+            },
+            onNo = { resetting = null },
+            yes = "Reset", no = "Cancel",
         )
     }
     curve?.let { c -> if (showCurve) AdaptationCurveDialog(listOf(c), settings) { showCurve = false } }
@@ -1159,7 +1370,7 @@ private fun ExerciseDetail(
 @Composable
 private fun SetCard(set: WorkSet, s: AppSettings, onClick: () -> Unit) {
     Column(
-        Modifier.fillMaxWidth().padding(bottom = 8.dp)
+        Modifier.fillMaxWidth()
             .clip(RoundedCornerShape(12.dp)).background(TutColors.Surface)
             .clickable(onClick = onClick).padding(12.dp)
     ) {
@@ -1172,17 +1383,21 @@ private fun SetCard(set: WorkSet, s: AppSettings, onClick: () -> Unit) {
             val text = rirText(set, s)?.removePrefix("RIR - ") ?: "—"
             LabeledRow("RIR", text, valueColor = if (set.rirLevel != null) set.rirLevel.toColor() else TutColors.Text)
         }
+        set.endRangeSec?.let { LabeledRow("End range hold", formatDuration(it)) }
+        set.topRestSec?.let { LabeledRow("Rest at top", formatDuration(it)) }
     }
 }
 
 /**
  * Holding anywhere on [content] for [holdMs] calls [onHeld], with a red fill showing how far
  * along the hold is ([showFill] off: no fill, the hold still works). Taps still reach the buttons inside; a finished hold swallows the release
- * so it doesn't also press one. Moving the finger (scrolling) cancels. 0 = off.
+ * so it doesn't also press one. Moving the finger (scrolling) cancels. 0 = off. Letting go after
+ * [noTapAfterMs] (0 = never) is swallowed too, so a long press that stops short doesn't count as a tap.
  */
 @Composable
 private fun HoldToAct(
     holdMs: Int, color: Color, onHeld: () -> Unit, modifier: Modifier = Modifier, showFill: Boolean = true,
+    noTapAfterMs: Int = 0,
     content: @Composable () -> Unit,
 ) {
     var progress by remember { mutableFloatStateOf(0f) }
@@ -1202,7 +1417,8 @@ private fun HoldToAct(
                             val change = ev?.changes?.firstOrNull { it.id == down.id }
                             if (ev != null && change == null) break
                             if (change != null) {
-                                if (fired) change.consume()
+                                val longPress = noTapAfterMs > 0 && SystemClock.uptimeMillis() - start >= noTapAfterMs
+                                if (fired || (longPress && !change.pressed)) change.consume()
                                 if (!change.pressed) break
                                 if (!fired && (change.position - down.position).getDistance() > viewConfiguration.touchSlop) break
                             }

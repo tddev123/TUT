@@ -14,12 +14,12 @@ sealed interface Action {
     /** A value for a set (or which set / exercise), as opposed to a command like start or done. */
     val isSetValue: Boolean
         get() = this is Exercise || this is SelectSet || this is Rest || this is Weight ||
-            this is Reps || this is Tut || this is Rir
+            this is Reps || this is Tut || this is Rir || this is EndRange
 
     data object Start : Action { override val spoken = "start" }
     data object Stop : Action { override val spoken = "stop" }
     data object Save : Action { override val spoken = "save" }
-    /** Finishes the current set; the controller builds the spoken reply. */
+    /** Finishes the current set ("done", "finished"); the controller builds the spoken reply. */
     data object Done : Action { override val spoken = "done" }
     /** Starts (or continues) the session's current voice recording. */
     data object AddNote : Action { override val spoken = "recording" }
@@ -41,6 +41,17 @@ sealed interface Action {
     }
     data class Rir(val level: RirLevel?, val value: Int?) : Action {
         override val spoken get() = if (level != null) "${level.label.lowercase()} R I R" else "R I R $value"
+    }
+    /** Seconds the end range position was held: "end range 10 seconds", "10 second hold". Optional. */
+    data class EndRange(val seconds: Int) : Action {
+        override val spoken get() = "${speakDuration(seconds)} end range hold"
+    }
+    /**
+     * Copies every value of another set of this exercise into the current set: "working set 2,
+     * copy working set 1". [kind] null ("copy set 1") means the same kind as the current set.
+     */
+    data class CopySet(val kind: SetKind?, val number: Int) : Action {
+        override val spoken get() = "copy ${kind?.spoken ?: "set"} $number"
     }
     /** Hours slept before this workout; goes on the big data block, not on a set. */
     data class Sleep(val hours: Double) : Action {
@@ -82,6 +93,8 @@ object CommandParser {
         BuiltInWord("yes", "Answer yes to the save question"),
         BuiltInWord("no", "Answer no to the save question"),
         BuiltInWord("done", "Finish the current set"),
+        BuiltInWord("finished", "Finish the current set, same as done"),
+        BuiltInWord("copy", "Copy another set into the current one: \"working set 2, copy working set 1\""),
         BuiltInWord("exercise", "Name the exercise: \"exercise bench press\""),
         BuiltInWord("warm up", "Pick a warm-up set: \"warm up set 1\""),
         BuiltInWord("working", "Pick a working set: \"working set 2\""),
@@ -94,6 +107,8 @@ object CommandParser {
         BuiltInWord("rest", "\"2 minutes rest\""),
         BuiltInWord("minutes", "\"2 minutes\""),
         BuiltInWord("seconds", "\"90 seconds\""),
+        BuiltInWord("end range", "Seconds the end range was held (optional): \"end range 10 seconds\""),
+        BuiltInWord("hold", "Same as end range: \"10 second hold\""),
         BuiltInWord("rir", "Reps in reserve: \"rir 2\", \"high rir\""),
         BuiltInWord("high", "\"high rir\""),
         BuiltInWord("moderate", "\"moderate rir\""),
@@ -332,6 +347,10 @@ object CommandParser {
             .replace(Regex("""\b(recovery(?: feeling| feelings| feel| feels)?(?: is| was| like)?(?: kind of| kinda)?) (?:soar|sour|soared|sorry|sor|soor)\b"""), "$1 sore")
             .replace(Regex("""\b(recovery(?: feeling| feelings| feel| feels)?(?: is| was| like)?(?: very)?) (?:flesh|fresch|french|frech|frash)\b"""), "$1 fresh")
             .replace(Regex("""\b(?:wrest|rests|rust|rist)\b"""), "rest")
+            // "and range", "in range", "end ranged" for end range
+            .replace(Regex("""\b(?:end|and|in|an) (?:range|ranged|ranges|rains|rage)\b"""), "end range")
+            // "coffee working set 1", only right before a set
+            .replace(Regex("""\b(?:coffee|copie|copies|copied|kopi|copy of)\b(?= (?:the |from )?(?:warm up set|working set|set)\b)"""), "copy")
             // "rest to minutes" = 2 minutes
             .replace(Regex("""\b(?:to|too) (?=(?:minutes?|mins?)\b)"""), "two ")
         return t
@@ -520,7 +539,7 @@ object CommandParser {
         Regex("""\bstart\b""") to { _ -> Action.Start },
         Regex("""\bstop\b""") to { _ -> Action.Stop },
         Regex("""\bsave\b""") to { _ -> Action.Save },
-        Regex("""\bdone\b""") to { _ -> Action.Done },
+        Regex("""\b(?:done|finished)\b""") to { _ -> Action.Done },
 
         // Voice notes. These are longer than "done"/"stop", so they win where they overlap.
         Regex("""\b(?:done|stop|end|finish|finished) (?:the )?(?:voice )?(?:recording|note)\b""") to { _ -> Action.EndNote },
@@ -554,6 +573,24 @@ object CommandParser {
         Regex("""\btut(?: is| of| was)? $DUR""") to { m -> durationSeconds(m, 0)?.let { Action.Tut(it) } },
         Regex("""\btut(?: is| of| was)? $NUM\b(?! pounds| kg| reps| rir)""") to { m ->
             bareDuration(m.groupValues[1], smallIsMinutes = false)?.let { Action.Tut(it) }
+        },
+
+        // End range hold: "end range 10 seconds", "end range hold 15", "10 second hold"
+        Regex("""\b$DUR (?:of )?(?:end range(?: hold)?|hold)\b""") to { m -> durationSeconds(m, 0)?.let { Action.EndRange(it) } },
+        Regex("""\b(?:end range(?: hold)?|hold)(?: is| of| was| for)? $DUR""") to { m -> durationSeconds(m, 0)?.let { Action.EndRange(it) } },
+        Regex("""\b(?:end range(?: hold)?|hold)(?: is| of| was| for)? $NUM\b(?! pounds| kg| reps| rir)""") to { m ->
+            bareDuration(m.groupValues[1], smallIsMinutes = false)?.let { Action.EndRange(it) }
+        },
+
+        // Copy another set into the current one: "copy working set 1", "same as set 1".
+        // Starts before the set it names, so it wins over picking that set.
+        Regex("""\b(?:copy|same as)(?: from)?(?: the)? (?:(warm up|working) )?set (?:number )?(\d{1,2})\b""") to { m ->
+            val kind = when (m.groupValues[1]) {
+                "warm up" -> SetKind.WARMUP
+                "working" -> SetKind.WORKING
+                else -> null
+            }
+            m.groupValues[2].toInt().takeIf { it in 1..20 }?.let { Action.CopySet(kind, it) }
         },
 
         // Weight: "9 pounds", "weight 100", "weight is 40 kg"

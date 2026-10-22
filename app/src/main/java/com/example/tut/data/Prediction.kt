@@ -16,6 +16,8 @@ data class Workout(
     val limitMarked: Boolean = false,
     /** Fatigue level set by hand; null = counted automatically ([Fatigue]). */
     val fatigueManual: Int? = null,
+    /** How recovered it felt, picked by hand; null = not picked. */
+    val recovery: RecoveryRating? = null,
 ) {
     val key: String get() = Predictions.key(name)
 }
@@ -79,6 +81,8 @@ data class PredictionCheck(
     val bestSet: WorkSet,
     val predictedEffortAtThatWeight: Double,
     val close: Boolean,
+    /** Set by set against last time, for exercises compared that way; null otherwise. */
+    val sets: ProgressScale.SetComparison? = null,
 ) {
     val missPct: Double get() = actualPct - predictedPct
 }
@@ -97,10 +101,19 @@ data class BestWorkout(
 /**
  * How progress is measured for one exercise. Every scale turns a workout's best set into a
  * score; progress from one workout to the next is the change in score, as a percentage.
+ *
+ * With [setBySet], progress is instead the set-by-set recovery score ([compareSets]) less 50, in
+ * points: 0 is the same as last time, +16 is 66%.
  */
 sealed class ProgressScale {
     abstract val timed: Boolean
+    /** Compare set by set rather than best set against best set; null = best set. */
+    abstract val setBySet: SetBySet?
     abstract fun bestSet(sets: List<WorkSet>): WorkSet?
+    /** The working sets that can be scored, in set order. */
+    abstract fun scoredSets(sets: List<WorkSet>): List<WorkSet>
+    /** How far set [b] is past set [a]: reps (at [b]'s weight) or seconds of time under tension. */
+    abstract fun effortGap(a: WorkSet, b: WorkSet): Double
     abstract fun score(set: WorkSet): Double
     /** Progress from score [before] to [after], in percent. */
     abstract fun change(before: Double, after: Double): Double
@@ -114,26 +127,70 @@ sealed class ProgressScale {
 
     fun score(sets: List<WorkSet>): Double? = bestSet(sets)?.let { score(it) }
 
+    /** A set must be [sameEffort] reps or seconds better (or worse) than last time's to count. */
+    data class SetBySet(val sameEffort: Double)
+
+    /**
+     * Set by set against last time: [points] per matched set (1 better, half same, 0 worse),
+     * [setsPct] their average as a percentage (50% = same as last time), [pct] after the [rating].
+     */
+    data class SetComparison(val points: List<Double>, val setsPct: Double, val rating: RecoveryRating?, val pct: Double) {
+        /** The score with the same as last time at 0. */
+        val progress: Double get() = pct - 50
+    }
+
+    /**
+     * Set 1 against last time's set 1, set 2 against set 2..., over the sets both workouts have,
+     * every set counting the same. A set within [SetBySet.sameEffort] of last time's is the same.
+     * The [rating] pulls the score towards its own value, more the closer the sets are to 50%:
+     * not at all when every set was better (or every set worse), up to halfway when they even out.
+     * Null without [setBySet] or with nothing to compare.
+     */
+    fun compareSets(before: List<WorkSet>, after: List<WorkSet>, rating: RecoveryRating?): SetComparison? {
+        val same = max(setBySet?.sameEffort ?: return null, 1e-6)
+        val a = scoredSets(before)
+        val b = scoredSets(after)
+        if (a.isEmpty() || b.isEmpty()) return null
+        val points = a.zip(b) { x, y ->
+            val gap = effortGap(x, y)
+            if (gap >= same - 1e-9) 1.0 else if (gap <= -same + 1e-9) 0.0 else 0.5
+        }
+        val sets = points.average() * 100
+        val feel = rating?.pct ?: return SetComparison(points, sets, rating, sets)
+        val weight = 0.5 * (1 - abs(sets - 50) / 50)
+        return SetComparison(points, sets, rating, sets + weight * (feel - sets))
+    }
+
+    /** Progress from workout [before] to [after]: set by set ([compareSets]) or best set against best set. */
+    fun progress(before: Workout, after: Workout): Double =
+        compareSets(before.sets, after.sets, after.recovery)?.progress ?: change(score(before.sets)!!, score(after.sets)!!)
+
+    /** Set by set, a change is in points of the recovery score: "+16 pts". */
+    protected fun pointsText(pct: Double) = signed(pct) + "${abs(pct).roundToInt()} pts"
+
     /**
      * Reps: a set's estimated one-rep max (Epley: weight × (1 + reps / 30)); a timed set counts
      * one rep per [SEC_PER_REP] seconds. Progress is the percent change in that max.
      */
-    class Reps(private val unit: WeightUnit) : ProgressScale() {
+    class Reps(private val unit: WeightUnit, override val setBySet: SetBySet? = null) : ProgressScale() {
         override val timed = false
         private fun reps(s: WorkSet) = s.reps?.toDouble() ?: s.tutSec?.div(SEC_PER_REP)
         private fun weight(s: WorkSet) = Progress.weightIn(s, unit)
 
-        override fun bestSet(sets: List<WorkSet>) =
-            sets.filter { it.kind == SetKind.WORKING && it.weight != null && reps(it) != null && weight(it) > 0 }
-                .maxByOrNull { score(it) }
+        override fun scoredSets(sets: List<WorkSet>) =
+            sets.filter { it.kind == SetKind.WORKING && it.weight != null && reps(it) != null && weight(it) > 0 }.sortedBy { it.number }
 
+        override fun bestSet(sets: List<WorkSet>) = scoredSets(sets).maxByOrNull { score(it) }
+
+        override fun effortGap(a: WorkSet, b: WorkSet) = 30 * (score(b) - score(a)) / weight(b)
         override fun score(set: WorkSet) = weight(set) * (1 + reps(set)!! / 30)
         override fun change(before: Double, after: Double) = (after / before - 1) * 100
-        override fun apply(before: Double, pct: Double) = before * (1 + pct / 100)
+        // Set by set predicts recovery, not strength: the best set is expected to match last time's.
+        override fun apply(before: Double, pct: Double) = if (setBySet != null) before else before * (1 + pct / 100)
         override fun effortAt(score: Double, weight: Double) = if (weight <= 0) 0.0 else max(0.0, 30 * (score / weight - 1))
         override fun effortOf(set: WorkSet) = reps(set) ?: 0.0
         override fun effortText(effort: Double) = if (effort < 0.5) "under 1 rep (too heavy)" else "${effort.roundToInt()} reps"
-        override fun changeText(pct: Double) = signed(pct) + Fmt1.pct(abs(pct))
+        override fun changeText(pct: Double) = if (setBySet != null) pointsText(pct) else signed(pct) + Fmt1.pct(abs(pct))
     }
 
     /**
@@ -150,6 +207,7 @@ sealed class ProgressScale {
         val stepValueSec: Double,
         /** Where [stepValueSec] came from: the trade set by hand, learned from workouts, or a guess. */
         val stepValueSource: StepValueSource = StepValueSource.GUESSED,
+        override val setBySet: SetBySet? = null,
     ) : ProgressScale() {
         override val timed = true
         private fun weight(s: WorkSet) = if (s.weight == null) 0.0 else Progress.weightIn(s, unit)
@@ -164,19 +222,25 @@ sealed class ProgressScale {
         }
 
         /** The heaviest timed working set: where the weight went up to, for learning the trade. */
+        override fun scoredSets(sets: List<WorkSet>) =
+            sets.filter { it.kind == SetKind.WORKING && it.tutSec != null }.sortedBy { it.number }
+
+        override fun effortGap(a: WorkSet, b: WorkSet) = score(b) - score(a)
+
         fun heaviest(sets: List<WorkSet>) =
             sets.filter { it.kind == SetKind.WORKING && it.tutSec != null }
                 .maxWithOrNull(compareBy({ weight(it) }, { it.tutSec!! }))
 
         override fun score(set: WorkSet) = weight(set) / step * stepValueSec + set.tutSec!!
         override fun change(before: Double, after: Double) = (after - before) / goalSec * 100
-        override fun apply(before: Double, pct: Double) = before + pct / 100 * goalSec
+        override fun apply(before: Double, pct: Double) = if (setBySet != null) before else before + pct / 100 * goalSec
         override fun effortAt(score: Double, weight: Double) = max(0.0, score - weight / step * stepValueSec)
         override fun effortOf(set: WorkSet) = set.tutSec?.toDouble() ?: 0.0
         // Never "0:00": a weight the time under tension can't even start with is called too heavy.
         override fun effortText(effort: Double) =
             if (effort < 1) "under 0:01 TUT (too heavy)" else formatDuration(effort.roundToInt()) + " TUT"
-        override fun changeText(pct: Double) = signed(pct) + formatDuration((abs(pct) / 100 * goalSec).roundToInt()) + " TUT"
+        override fun changeText(pct: Double) =
+            if (setBySet != null) pointsText(pct) else signed(pct) + formatDuration((abs(pct) / 100 * goalSec).roundToInt()) + " TUT"
 
         /** The weight for the next workout: one step up once the time under tension reached the goal. */
         fun nextWeight(last: WorkSet): Double = weight(last) + if (last.tutSec!! >= goalSec) step else 0.0
@@ -205,6 +269,9 @@ private object Fmt1 {
  * lifted is left out of what the model learns from: heavier sets go with being stronger, and the
  * model would otherwise "learn" that lifting heavier makes you stronger.
  *
+ * Exercises switched to set by set ([AppSettings.comparesAllSets]) learn the recovery score
+ * instead ([ProgressScale.compareSets]): every working set against the same set last time.
+ *
  * Workouts marked "near the limit" cap the predictions: no prediction goes above the progress
  * those workouts made.
  */
@@ -232,7 +299,7 @@ object Predictions {
         "Average progress so far",
         "Workouts logged",
         "Last best set (reps, or seconds if timed)",
-        "Fatigue level",
+        "Compared set by set",
     )
 
     /** One workout the model learned from: its inputs and the progress it really made. */
@@ -247,21 +314,20 @@ object Predictions {
 
     fun key(name: String) = name.trim().lowercase()
 
-    /** Everything known about an exercise before the workout being predicted. */
+    /**
+     * Everything known about an exercise before the workout being predicted. The fatigue level
+     * ([Fatigue]) is left out: it's only shown on the exercise, never a prediction input.
+     */
     data class History(
         val workouts: List<Workout>,
         val strengths: List<Double>,
         val scale: ProgressScale,
         val s: AppSettings,
-        /** Fatigue level after each workout ([Fatigue]). */
-        val fatigue: List<Int> = List(workouts.size) { 0 },
     ) {
-        /** Fatigue built up by the last workout: what the next one starts with. */
-        val lastFatigue: Int get() = fatigue.lastOrNull() ?: 0
         val last: Workout get() = workouts.last()
         val lastStrength: Double get() = strengths.last()
         val lastBest: WorkSet get() = scale.bestSet(last.sets)!!
-        val changes: List<Double> get() = strengths.zipWithNext { a, b -> scale.change(a, b) }
+        val changes: List<Double> get() = workouts.zipWithNext(scale::progress)
     }
 
     fun planOf(w: Workout, lastAt: Long, s: AppSettings): Plan {
@@ -293,7 +359,7 @@ object Predictions {
             changes.takeIf { it.isNotEmpty() }?.average() ?: MISSING,
             h.workouts.size.toDouble(),
             h.scale.effortOf(h.lastBest),
-            h.lastFatigue.toDouble(),
+            if (h.scale.setBySet != null) 1.0 else 0.0,
         )
     }
 
@@ -303,7 +369,11 @@ object Predictions {
      */
     fun scaleFor(name: String, workouts: List<Workout>, s: AppSettings): ProgressScale {
         val timed = workouts.count { w -> w.sets.any { it.kind == SetKind.WORKING && it.tutSec != null } }
-        if (timed * 2 < workouts.size || timed == 0) return ProgressScale.Reps(s.weightUnit)
+        val allSets = s.comparesAllSets(name)
+        if (timed * 2 < workouts.size || timed == 0) {
+            return ProgressScale.Reps(s.weightUnit, if (allSets) ProgressScale.SetBySet(s.setSameReps.toDouble()) else null)
+        }
+        val sb = if (allSets) ProgressScale.SetBySet(s.setSameTutSec.toDouble()) else null
         val rule = s.progressionFor(name)
         val goal = rule.tutGoalSec.toDouble().coerceAtLeast(1.0)
         val step = rule.loadStep.toDouble().coerceAtLeast(0.01)
@@ -315,13 +385,13 @@ object Predictions {
         }.filterNotNull().sorted()
         // The trade set by hand wins; then what the workouts show; then half the goal as a guess.
         rule.secondsPerWeight?.let { perWeight ->
-            return ProgressScale.Tut(s.weightUnit, goal, step, (perWeight * step).coerceAtLeast(1.0), ProgressScale.StepValueSource.SET)
+            return ProgressScale.Tut(s.weightUnit, goal, step, (perWeight * step).coerceAtLeast(1.0), ProgressScale.StepValueSource.SET, sb)
         }
-        if (drops.isEmpty()) return ProgressScale.Tut(s.weightUnit, goal, step, goal / 2, ProgressScale.StepValueSource.GUESSED)
+        if (drops.isEmpty()) return ProgressScale.Tut(s.weightUnit, goal, step, goal / 2, ProgressScale.StepValueSource.GUESSED, sb)
         val mid = drops.size / 2
         val median = if (drops.size % 2 == 1) drops[mid] else (drops[mid - 1] + drops[mid]) / 2
         val stepValue = median.coerceIn(goal * 0.05, goal)
-        return ProgressScale.Tut(s.weightUnit, goal, step, stepValue, ProgressScale.StepValueSource.LEARNED)
+        return ProgressScale.Tut(s.weightUnit, goal, step, stepValue, ProgressScale.StepValueSource.LEARNED, sb)
     }
 
     class Model internal constructor(
@@ -369,9 +439,9 @@ object Predictions {
         /** Every workout it learned from, built the same way as when it learned. */
         fun learnedRows(): List<LearnedRow> = histories.values.flatMap { h ->
             (1 until h.workouts.size).map { i ->
-                val before = History(h.workouts.subList(0, i), h.strengths.subList(0, i), h.scale, h.s, h.fatigue.subList(0, i))
+                val before = History(h.workouts.subList(0, i), h.strengths.subList(0, i), h.scale, h.s)
                 val plan = planOf(h.workouts[i], h.workouts[i - 1].at, h.s)
-                LearnedRow(h.workouts[i].name, h.workouts[i].at, features(plan, before), h.scale.change(h.strengths[i - 1], h.strengths[i]))
+                LearnedRow(h.workouts[i].name, h.workouts[i].at, features(plan, before), h.scale.progress(h.workouts[i - 1], h.workouts[i]))
             }
         }
 
@@ -486,8 +556,8 @@ object Predictions {
             val same = workouts.filter { it.key == key(p.name) }
             val scale = scale(p.name) ?: scaleFor(p.name, same, s)
             // Last time's score on today's scale (progression settings may have changed since).
-            val baseline = same.firstOrNull { it.exerciseId == p.baselineExerciseId }?.let { scale.score(it.sets) }
-                ?: p.baselineStrength
+            val baselineWorkout = same.firstOrNull { it.exerciseId == p.baselineExerciseId }
+            val baseline = baselineWorkout?.let { scale.score(it.sets) } ?: p.baselineStrength
             val done = same
                 .filter { it.exerciseId != p.baselineExerciseId && it.at >= p.baselineAt }
                 .sortedWith(compareBy({ it.at }, { it.exerciseId }))
@@ -495,12 +565,15 @@ object Predictions {
             val bestSet = scale.bestSet(done.sets)!!
             val gap = (done.at - p.baselineAt) / HOUR
             val predicted = at(p.curve, gap)
-            val actual = scale.change(baseline, scale.score(bestSet))
+            val sets = baselineWorkout?.let { scale.compareSets(it.sets, done.sets, done.recovery) }
+            // Set by set needs last time's sets: without them (that block deleted) it can't be checked.
+            if (scale.setBySet != null && sets == null) return null
+            val actual = sets?.progress ?: scale.change(baseline, scale.score(bestSet))
             val setWeight = if (bestSet.weight == null) 0.0 else Progress.weightIn(bestSet, s.weightUnit)
             return PredictionCheck(
                 workout = done, gapHours = gap, actualPct = actual, predictedPct = predicted, bestSet = bestSet,
                 predictedEffortAtThatWeight = scale.effortAt(scale.apply(baseline, predicted), setWeight),
-                close = abs(actual - predicted) <= CLOSE_PCT,
+                close = abs(actual - predicted) <= CLOSE_PCT, sets = sets,
             )
         }
     }
@@ -512,8 +585,7 @@ object Predictions {
             val scored = list.mapNotNull { w -> scale.score(w.sets)?.let { w to it } }
                 .sortedWith(compareBy({ it.first.at }, { it.first.exerciseId }))
             if (scored.isEmpty()) return@mapNotNull null
-            val levels = Fatigue.levels(list, scale, s)
-            k to History(scored.map { it.first }, scored.map { it.second }, scale, s, scored.map { levels[it.first.exerciseId]?.level ?: 0 })
+            k to History(scored.map { it.first }, scored.map { it.second }, scale, s)
         }.toMap()
 
         val x = mutableListOf<DoubleArray>()
@@ -523,8 +595,8 @@ object Predictions {
         val markedByKind = mutableMapOf<Boolean, MutableList<Double>>()
         for ((k, h) in histories) {
             for (i in 1 until h.workouts.size) {
-                val before = History(h.workouts.subList(0, i), h.strengths.subList(0, i), h.scale, s, h.fatigue.subList(0, i))
-                val change = h.scale.change(h.strengths[i - 1], h.strengths[i])
+                val before = History(h.workouts.subList(0, i), h.strengths.subList(0, i), h.scale, s)
+                val change = h.scale.progress(h.workouts[i - 1], h.workouts[i])
                 val plan = planOf(h.workouts[i], h.workouts[i - 1].at, s)
                 gaps.getOrPut(k) { mutableListOf() } += plan.gapHours
                 x += features(plan, before)

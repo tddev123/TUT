@@ -243,7 +243,7 @@ private fun PlanTab(m: Predictions.Model, s: AppSettings, onLock: (LockedPredict
         val hist = h!!
         Text(
             "Last time: ${Fmt.date(last.at)} · best set ${bestSetText(hist.lastBest, hist.scale, s)}" +
-                " · fatigue level ${hist.lastFatigue}" + limitText(m, last.name),
+                limitText(m, last.name),
             color = TutColors.Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp),
         )
         RestWarning(m, last.name)
@@ -429,8 +429,18 @@ private fun CheckResult(
         Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(10.dp)).background(TutColors.SurfaceHigh).padding(10.dp),
     ) {
         Text("Done ${Fmt.date(c.workout.at)}, after ${daysText(c.gapHours)} of rest", color = TutColors.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        LabeledRow("Actual best set", "${Fmt.number(setWeight)} $unit × ${scale.effortText(actualEffort)} (${scale.changeText(c.actualPct)})")
-        LabeledRow("Predicted for that", "${Fmt.number(setWeight)} $unit × ${scale.effortText(c.predictedEffortAtThatWeight)} (${scale.changeText(c.predictedPct)})")
+        val sets = c.sets
+        if (sets != null) {
+            val verdicts = sets.points.mapIndexed { i, p -> "${i + 1} " + if (p >= 1.0) "better" else if (p <= 0.0) "worse" else "same" }
+            LabeledRow("Sets", verdicts.joinToString(" · ") + " → ${sets.setsPct.roundToInt()}%")
+            sets.rating?.takeIf { abs(sets.pct - sets.setsPct) >= 0.5 }?.let { r ->
+                LabeledRow("With your rating", "${r.label.lowercase()}: ${sets.pct.roundToInt()}%")
+            }
+            LabeledRow("Recovery score", "${sets.pct.roundToInt()}% (${scale.changeText(c.actualPct)}; 50% = same as last time)")
+        }
+        LabeledRow("Actual best set", "${Fmt.number(setWeight)} $unit × ${scale.effortText(actualEffort)}" + if (sets == null) " (${scale.changeText(c.actualPct)})" else "")
+        if (sets != null) LabeledRow("Predicted", "${(50 + c.predictedPct).roundToInt()}% (${scale.changeText(c.predictedPct)})")
+        else LabeledRow("Predicted for that", "${Fmt.number(setWeight)} $unit × ${scale.effortText(c.predictedEffortAtThatWeight)} (${scale.changeText(c.predictedPct)})")
         Text(
             if (c.close) "Close to the prediction: off by ${scale.changeText(abs(c.missPct)).drop(1)}."
             else "Not close to the prediction: ${if (c.missPct > 0) "more" else "less"} progress than predicted, by ${scale.changeText(abs(c.missPct)).drop(1)}.",

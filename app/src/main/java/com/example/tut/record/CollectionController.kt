@@ -442,6 +442,18 @@ class CollectionController(
                 val head = "${set.kind.spoken} ${set.number} done" + if (values.isEmpty()) "" else ", $values"
                 return if (missing.isEmpty()) head else "$head, missing ${missing.joinToString(" and ")}"
             }
+            is Action.CopySet -> {
+                // Copies another set's values into the current set; what's said next edits the copy.
+                val set = currentSetId?.let { repo.set(it) } ?: return "say which set to copy into first"
+                val kind = action.kind ?: set.kind
+                val label = "${kind.spoken} ${action.number}"
+                if (kind == set.kind && action.number == set.number) return "that's the same set"
+                val from = repo.sets(set.exerciseId).firstOrNull { it.kind == kind && it.number == action.number }
+                if (from == null || (!from.hasData && from.endRangeSec == null && from.topRestSec == null)) return "$label is empty"
+                app.ops.saveSet(set.copyValuesFrom(from), now)
+                afterChange()
+                return "copied $label"
+            }
             is Action.SelectSet -> {
                 val exId = ensureExercise(now)
                 var set = repo.getOrCreateSet(exId, action.kind, action.number)
@@ -477,6 +489,7 @@ class CollectionController(
         set.reps?.let { Action.Reps(it).spoken },
         set.tutSec?.let { Action.Tut(it).spoken },
         if (set.rirLevel != null || set.rirValue != null) Action.Rir(set.rirLevel, set.rirValue).spoken else null,
+        set.endRangeSec?.let { Action.EndRange(it).spoken },
     ).joinToString(", ")
 
     /**

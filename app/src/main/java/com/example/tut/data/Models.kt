@@ -16,6 +16,27 @@ enum class RecoveryFeeling(val label: String) {
 }
 
 /**
+ * How recovered one exercise felt, picked by hand inside the exercise. [pct] is where it sits on
+ * the set-by-set recovery score (50% = same as last time); "can't tell" has none and changes nothing.
+ * Only a hint: the clearer the sets are, the less it counts ([ProgressScale.compareSets]).
+ */
+enum class RecoveryRating(val label: String, val pct: Double?) {
+    SUPER_FATIGUED("Super fatigued", 10.0), FATIGUED("Fatigued", 20.0), KIND_OF_FATIGUED("Kind of fatigued", 35.0),
+    CANT_TELL("Can't tell", null),
+    KIND_OF_RECOVERED("Kind of recovered", 60.0),
+    RECOVERED("Recovered", 70.0), DEFINITELY_RECOVERED("Definitely recovered", 80.0),
+}
+
+/**
+ * How the trained muscle feels right after the workout or the next day, picked by hand inside the exercise. Only for
+ * reading back: it is never given to the prediction model.
+ */
+enum class MuscleFeel(val label: String) {
+    VERY_SORE("Very sore"), NOTICEABLY_SORE("Noticeably sore"), A_LITTLE_SORE("A little bit sore"),
+    CANT_FEEL_ANYTHING("Can't feel anything"),
+}
+
+/**
  * Progress colour of a block. A stronger streak climbs green -> GOLD_DARK -> GOLD_MEDIUM -> GOLD
  * (the highest) and stays GOLD while it lasts. The names are the streak steps as stored in the
  * database; on screen they show as medium, light and lighter gold.
@@ -87,6 +108,12 @@ data class Exercise(
     val limitMarked: Boolean = false,
     /** Fatigue level set by hand; null = counted automatically ([Fatigue]). */
     val fatigueManual: Int? = null,
+    /** How recovered it felt, picked by hand; null = not picked. */
+    val recoveryRating: RecoveryRating? = null,
+    /** How the muscle felt immediately after the workout; null = not picked. Kept out of the prediction model. */
+    val muscleFeel: MuscleFeel? = null,
+    /** How the muscle felt the next day; null = not picked. Kept out of the prediction model. */
+    val muscleFeelNextDay: MuscleFeel? = null,
 ) {
     val displayName: String get() = name.ifBlank { "Exercise ${position + 1}" }
     val totalTimeMs: Long
@@ -107,10 +134,24 @@ data class WorkSet(
     val rirLevel: RirLevel? = null,
     val rirValue: Int? = null,
     val completedAt: Long? = null,
+    /** Seconds the end range position was held; optional, null = not given. Not a prediction input. */
+    val endRangeSec: Int? = null,
+    /** Seconds rested at the top; optional, null = not given. Not a prediction input. */
+    val topRestSec: Int? = null,
 ) {
     val label: String get() = "${kind.label} $number"
 
     val hasData: Boolean get() = restSec != null || weight != null || reps != null || tutSec != null || rirLevel != null || rirValue != null
+
+    /** Every value of [other] (except which set it is and when it was finished) copied into this set. */
+    fun copyValuesFrom(other: WorkSet): WorkSet = copy(
+        restSec = other.restSec, weight = other.weight, unit = other.unit, reps = other.reps, tutSec = other.tutSec,
+        rirLevel = other.rirLevel, rirValue = other.rirValue, endRangeSec = other.endRangeSec,
+        topRestSec = other.topRestSec,
+    )
+
+    /** This set back to blank: no values and not finished. */
+    fun cleared(): WorkSet = WorkSet(id, exerciseId, kind, number)
 
     /** Values not yet given for this set (reps or time under tension both count). */
     fun missingFields(s: AppSettings): List<String> = buildList {

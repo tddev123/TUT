@@ -162,6 +162,10 @@ private fun DataSettings(s: AppSettings, update: (AppSettings) -> Unit) {
         Choice("Hold to rename an exercise", listOf(0, 500, 1_000, 2_000, 3_000), s.renameExerciseHoldMs, {
             if (it == 0) "Tap" else "${Fmt.number(it / 1000.0)} s"
         }) { update(s.copy(renameExerciseHoldMs = it)) }
+        Choice("Hold to pick a choice in an exercise", listOf(0, 250, 500, 1_000, 2_000), s.pickHoldMs, {
+            if (it == 0) "Tap" else "${Fmt.number(it / 1000.0)} s"
+        }) { update(s.copy(pickHoldMs = it)) }
+        Hint("Inside an exercise in the database: how long to hold fatigue level, how recovered it felt and how the muscle feels before the choice is picked. Letting go sooner picks nothing.")
         Hint("Inside an exercise in the database, holding the \"Hold to rename\" box next to its name lets you rename it; you're asked to confirm before it's saved.")
         Toggle("Custom data", s.customData) { update(s.copy(customData = it)) }
         Hint(
@@ -344,6 +348,15 @@ private fun FatigueSettings(s: AppSettings, update: (AppSettings) -> Unit) {
             if (it == 0f) "Off" else Fmt.number(it.toDouble())
         }) { update(s.copy(fatigueBigDropWeight = it)) }
         Hint("Dropping this much time under tension, or this much weight, from one workout to the next adds two levels instead of one.")
+    }
+    Section("Set by set") {
+        Hint(
+            "For exercises switched to \"include all working sets\" (inside an exercise in the database): each working set " +
+                "is compared with the same set last time. It has to change by at least this much to count as better or " +
+                "worse; less is the same."
+        )
+        TimeStepper("Time under tension: at least", s.setSameTutSec, step = 5, min = 0) { update(s.copy(setSameTutSec = it)) }
+        Stepper("Reps: at least", s.setSameReps, 0..10) { update(s.copy(setSameReps = it)) }
     }
 }
 

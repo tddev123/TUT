@@ -55,6 +55,8 @@ fun SetEditDialog(
     var tutSec by remember { mutableStateOf(set.tutSec?.let { (it % 60).toString() } ?: "") }
     var rirLevel by remember { mutableStateOf(set.rirLevel) }
     var rirValue by remember { mutableStateOf(set.rirValue?.toString() ?: "") }
+    var endRange by remember { mutableStateOf(set.endRangeSec?.toString() ?: "") }
+    var topRest by remember { mutableStateOf(set.topRestSec?.toString() ?: "") }
 
     // Both can always be filled in: progress can go by reps or by time under tension.
     val showReps = true
@@ -119,6 +121,12 @@ fun SetEditDialog(
                     }
                 }
 
+                FieldLabel("End range hold seconds (optional)")
+                NumberField(endRange, { endRange = it }, "sec", Modifier.fillMaxWidth())
+
+                FieldLabel("Rest at top seconds (optional)")
+                NumberField(topRest, { topRest = it }, "sec", Modifier.fillMaxWidth())
+
                 Row(
                     Modifier.fillMaxWidth().padding(top = 16.dp),
                     horizontalArrangement = Arrangement.End,
@@ -140,6 +148,8 @@ fun SetEditDialog(
                                     tutSec = if (showTut) tut else set.tutSec,
                                     rirLevel = if (rv != null) levelFor(rv, settings) else rirLevel,
                                     rirValue = rv,
+                                    endRangeSec = endRange.toIntOrNull(),
+                                    topRestSec = topRest.toIntOrNull(),
                                 )
                             )
                         },

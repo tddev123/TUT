@@ -87,6 +87,7 @@ data class AppSettings(
     // Skills database
     val skillCapacityHours: Float = 2.0f, // daily skill capacity given to new skills, 0..16 in tenths
     val deleteRecordingHoldMs: Int = 1_000,
+    val pickHoldMs: Int = 500, // hold a choice inside an exercise (fatigue, recovery, muscle feel) to pick it; 0 = a tap
     val renameExerciseHoldMs: Int = 1_000, // hold an exercise's name in the database to rename it; 0 = a tap // hold a recording in a big data block to delete it; 0 = off
     val addSkillHoldMs: Int = 1_000,      // hold the + under the skill blocks to add one; 0 = a tap adds
     val curveUnit: CurveUnit = CurveUnit.HOURS, // time axis of the adaptation curve
@@ -103,6 +104,10 @@ data class AppSettings(
     val tutGoalSec: Int = 360,
     val loadStep: Float = 1f,
     val progressionRules: List<ProgressionRule> = emptyList(), // per exercise, instead of the two above
+    // Exercises (by Predictions.key) whose progress compares every working set, not just the best one.
+    val allSetsExercises: Set<String> = emptySet(),
+    val setSameTutSec: Int = 30, // set by set: a set's time under tension must change this much to count as better / worse
+    val setSameReps: Int = 1,    // ... or its reps, this much
     // Fatigue scoreboard: worse than last time adds a level; see Fatigue.
     val fatigueSameSec: Int = 30,          // within this much time under tension counts as the same
     val fatigueBigDropSec: Int = 180,      // a drop this big adds two levels
@@ -125,9 +130,15 @@ data class AppSettings(
         progressionRules.firstOrNull { it.name.isNotBlank() && it.name.trim().equals(exercise.trim(), ignoreCase = true) }
             ?: ProgressionRule("", tutGoalSec, loadStep)
 
+    /** Whether [exercise]'s progress compares set 1 with set 1, set 2 with set 2... instead of best set with best set. */
+    fun comparesAllSets(exercise: String): Boolean = Predictions.key(exercise) in allSetsExercises
+
     /** Everything that decides stronger / same / weaker; when it changes, colours are recalculated. */
-    val thresholds: List<Number>
-        get() = listOf(weightUpThreshold, weightDownThreshold, repsUpThreshold, repsDownThreshold, tutUpThresholdSec, tutDownThresholdSec)
+    val thresholds: List<Any>
+        get() = listOf(
+            weightUpThreshold, weightDownThreshold, repsUpThreshold, repsDownThreshold, tutUpThresholdSec, tutDownThresholdSec,
+            allSetsExercises, setSameTutSec, setSameReps,
+        )
 
     companion object {
         const val DEFAULT_MODEL = "ggml-small.en-q8_0.bin"
@@ -183,6 +194,7 @@ class SettingsStore(context: Context) {
             addSkillHoldMs = prefs.getInt("addSkillHoldMs", d.addSkillHoldMs),
             deleteRecordingHoldMs = prefs.getInt("deleteRecordingHoldMs", d.deleteRecordingHoldMs),
             renameExerciseHoldMs = prefs.getInt("renameExerciseHoldMs", d.renameExerciseHoldMs),
+            pickHoldMs = prefs.getInt("pickHoldMs", d.pickHoldMs),
             curveUnit = enumOr(prefs.getString("curveUnit", null), d.curveUnit),
             rapidInput = prefs.getBoolean("rapidInput", d.rapidInput),
             startWordCount = prefs.getInt("startWordCount", d.startWordCount),
@@ -194,6 +206,9 @@ class SettingsStore(context: Context) {
             tutGoalSec = prefs.getInt("tutGoalSec", d.tutGoalSec),
             loadStep = prefs.getFloat("loadStep", d.loadStep),
             progressionRules = prefs.getString("progressionRules", null)?.let(::rulesFromJson) ?: d.progressionRules,
+            allSetsExercises = prefs.getStringSet("allSetsExercises", null)?.toSet() ?: d.allSetsExercises,
+            setSameTutSec = prefs.getInt("setSameTutSec", d.setSameTutSec),
+            setSameReps = prefs.getInt("setSameReps", d.setSameReps),
             fatigueSameSec = prefs.getInt("fatigueSameSec", d.fatigueSameSec),
             fatigueBigDropSec = prefs.getInt("fatigueBigDropSec", d.fatigueBigDropSec),
             fatigueBigDropWeight = prefs.getFloat("fatigueBigDropWeight", d.fatigueBigDropWeight),
@@ -248,6 +263,7 @@ class SettingsStore(context: Context) {
             .putInt("addSkillHoldMs", s.addSkillHoldMs)
             .putInt("deleteRecordingHoldMs", s.deleteRecordingHoldMs)
             .putInt("renameExerciseHoldMs", s.renameExerciseHoldMs)
+            .putInt("pickHoldMs", s.pickHoldMs)
             .putString("curveUnit", s.curveUnit.name)
             .putBoolean("rapidInput", s.rapidInput)
             .putInt("startWordCount", s.startWordCount)
@@ -259,6 +275,9 @@ class SettingsStore(context: Context) {
             .putInt("tutGoalSec", s.tutGoalSec)
             .putFloat("loadStep", s.loadStep)
             .putString("progressionRules", rulesToJson(s.progressionRules))
+            .putStringSet("allSetsExercises", s.allSetsExercises)
+            .putInt("setSameTutSec", s.setSameTutSec)
+            .putInt("setSameReps", s.setSameReps)
             .putInt("fatigueSameSec", s.fatigueSameSec)
             .putInt("fatigueBigDropSec", s.fatigueBigDropSec)
             .putFloat("fatigueBigDropWeight", s.fatigueBigDropWeight)

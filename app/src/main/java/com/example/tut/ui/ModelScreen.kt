@@ -303,6 +303,7 @@ private fun inputText(i: Int, v: Double): String {
         0, 8 -> Fmt.number(r1(v / 24)).let { if (it == "1") "1 day" else "$it days" }
         2, 6 -> formatDuration(v.roundToInt())
         7, 9 -> (if (v >= 0) "+" else "−") + Fmt.number(r1(abs(v))) + "%"
+        12 -> if (v >= 0.5) "yes" else "no"
         else -> Fmt.number(r1(v))
     }
 }

@@ -315,4 +315,27 @@ class CommandParserTest {
             p("recovery feeling fresh 8 hours of sleep working set 1 10 reps"),
         )
     }
+
+    @Test
+    fun copySetThenEdit() {
+        assertEquals(
+            listOf(Action.SelectSet(SetKind.WORKING, 2), Action.CopySet(SetKind.WORKING, 1), Action.Tut(120), Action.Done),
+            p("working set two copy working set one, two minutes time under tension, finished"),
+        )
+        assertEquals(listOf(Action.SelectSet(SetKind.WORKING, 3), Action.CopySet(null, 2)), p("working set 3 copy set 2"))
+        assertEquals(listOf(Action.CopySet(SetKind.WARMUP, 1)), p("coffee warm up set 1"))
+        assertEquals(listOf(Action.Rest(120)), p("rest time 2 minutes"))
+    }
+
+    @Test
+    fun endRangeHold() {
+        assertEquals(listOf(Action.EndRange(10)), p("end range 10 seconds"))
+        assertEquals(listOf(Action.EndRange(15)), p("end range hold fifteen"))
+        assertEquals(listOf(Action.EndRange(20)), p("and range twenty seconds"))
+        assertEquals(listOf(Action.EndRange(30)), p("thirty second hold"))
+        assertEquals(
+            listOf(Action.SelectSet(SetKind.WORKING, 1), Action.Weight(100.0, WeightUnit.LBS), Action.EndRange(12), Action.Done),
+            p("working set 1 100 pounds end range 12 seconds done"),
+        )
+    }
 }

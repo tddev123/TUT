@@ -12,7 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-private class TutDbHelper(context: Context, fileName: String) : SQLiteOpenHelper(context, fileName, null, 12) {
+private class TutDbHelper(context: Context, fileName: String) : SQLiteOpenHelper(context, fileName, null, 16) {
     override fun onConfigure(db: SQLiteDatabase) {
         db.setForeignKeyConstraintsEnabled(true)
     }
@@ -44,7 +44,10 @@ private class TutDbHelper(context: Context, fileName: String) : SQLiteOpenHelper
                 color TEXT,
                 note_path TEXT,
                 limit_marked INTEGER NOT NULL DEFAULT 0,
-                fatigue_manual INTEGER)"""
+                fatigue_manual INTEGER,
+                recovery_rating TEXT,
+                muscle_feel TEXT,
+                muscle_feel_next_day TEXT)"""
         )
         db.execSQL(
             """CREATE TABLE sets(
@@ -60,6 +63,8 @@ private class TutDbHelper(context: Context, fileName: String) : SQLiteOpenHelper
                 rir_level TEXT,
                 rir_value INTEGER,
                 completed_at INTEGER,
+                end_range_sec INTEGER,
+                top_rest_sec INTEGER,
                 UNIQUE(exercise_id, kind, number))"""
         )
         db.execSQL("CREATE INDEX idx_ex_session ON exercises(session_id)")
@@ -150,6 +155,17 @@ private class TutDbHelper(context: Context, fileName: String) : SQLiteOpenHelper
         if (oldVersion < 11) db.execSQL("ALTER TABLE sessions ADD COLUMN sleep_hours REAL")
         // v12: recovery feeling, said by voice; NULL = not given. Never used by the prediction model.
         if (oldVersion < 12) db.execSQL("ALTER TABLE sessions ADD COLUMN recovery TEXT")
+        // v13: how recovered an exercise felt, picked by hand; NULL = not picked.
+        if (oldVersion < 13) db.execSQL("ALTER TABLE exercises ADD COLUMN recovery_rating TEXT")
+        // v14: how the muscle felt after the workout (never a prediction input), and each set's end range hold.
+        if (oldVersion < 14) {
+            db.execSQL("ALTER TABLE exercises ADD COLUMN muscle_feel TEXT")
+            db.execSQL("ALTER TABLE sets ADD COLUMN end_range_sec INTEGER")
+        }
+        // v15: how the muscle felt the next day. Never a prediction input.
+        if (oldVersion < 15) db.execSQL("ALTER TABLE exercises ADD COLUMN muscle_feel_next_day TEXT")
+        // v16: seconds rested at the top of each set. Never a prediction input.
+        if (oldVersion < 16) db.execSQL("ALTER TABLE sets ADD COLUMN top_rest_sec INTEGER")
     }
 }
 
@@ -388,6 +404,22 @@ class Repository(context: Context, fileName: String) {
         changed()
     }
 
+    /** Sets how recovered a workout felt; null = not picked. */
+    fun setExerciseRecovery(id: Long, rating: RecoveryRating?) {
+        db.update("exercises", ContentValues().apply { put("recovery_rating", rating?.name) }, "id=?", arrayOf(id.toString()))
+        changed()
+    }
+
+    /**
+     * Sets how the muscle felt immediately after the workout, or the next day ([nextDay]);
+     * null = not picked. Not a prediction input.
+     */
+    fun setExerciseMuscleFeel(id: Long, feel: MuscleFeel?, nextDay: Boolean = false) {
+        val col = if (nextDay) "muscle_feel_next_day" else "muscle_feel"
+        db.update("exercises", ContentValues().apply { put(col, feel?.name) }, "id=?", arrayOf(id.toString()))
+        changed()
+    }
+
     fun setExerciseColor(id: Long, color: BlockColor?) {
         db.update("exercises", ContentValues().apply { put("color", color?.name) }, "id=?", arrayOf(id.toString()))
         changed()
@@ -484,6 +516,8 @@ class Repository(context: Context, fileName: String) {
             put("rir_level", s.rirLevel?.name)
             put("rir_value", s.rirValue)
             put("completed_at", s.completedAt)
+            put("end_range_sec", s.endRangeSec)
+            put("top_rest_sec", s.topRestSec)
         }, "id=?", arrayOf(s.id.toString()))
         changed()
     }
@@ -786,6 +820,9 @@ class Repository(context: Context, fileName: String) {
         notePath = str("note_path"),
         limitMarked = int("limit_marked") == 1,
         fatigueManual = int("fatigue_manual"),
+        recoveryRating = str("recovery_rating")?.let(::ratingOf),
+        muscleFeel = str("muscle_feel")?.let { v -> MuscleFeel.entries.firstOrNull { it.name == v } },
+        muscleFeelNextDay = str("muscle_feel_next_day")?.let { v -> MuscleFeel.entries.firstOrNull { it.name == v } },
     )
 
     private fun Cursor.toSet() = WorkSet(
@@ -801,7 +838,13 @@ class Repository(context: Context, fileName: String) {
         rirLevel = str("rir_level")?.let { RirLevel.valueOf(it) },
         rirValue = int("rir_value"),
         completedAt = long("completed_at"),
+        endRangeSec = int("end_range_sec"),
+        topRestSec = int("top_rest_sec"),
     )
+
+    // "A little recovered" was dropped: it reads as the nearest one left.
+    private fun ratingOf(name: String) =
+        if (name == "A_LITTLE_RECOVERED") RecoveryRating.KIND_OF_RECOVERED else RecoveryRating.entries.firstOrNull { it.name == name }
 
     // ---- predictions ----
 
@@ -814,7 +857,7 @@ class Repository(context: Context, fileName: String) {
             buildList { while (c.moveToNext()) add(c.toSet()) }
         }.groupBy { it.exerciseId }
         return db.rawQuery(
-            "SELECT e.id, e.name, s.started_at, e.limit_marked, e.fatigue_manual FROM exercises e JOIN sessions s ON s.id = e.session_id " +
+            "SELECT e.id, e.name, s.started_at, e.limit_marked, e.fatigue_manual, e.recovery_rating FROM exercises e JOIN sessions s ON s.id = e.session_id " +
                 "WHERE TRIM(e.name) != '' AND s.excluded = 0 AND s.trashed_at IS NULL",
             null,
         ).use { c ->
@@ -825,6 +868,7 @@ class Repository(context: Context, fileName: String) {
                         Workout(
                             id, c.getString(1), c.getLong(2), sets[id].orEmpty(), limitMarked = c.getInt(3) == 1,
                             fatigueManual = if (c.isNull(4)) null else c.getInt(4),
+                            recovery = c.getString(5)?.let(::ratingOf),
                         )
                     )
                 }
